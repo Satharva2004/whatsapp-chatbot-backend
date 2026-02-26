@@ -38,10 +38,26 @@ app.post('/webhook', async (req, res) => {
         ) {
             const msg = body.entry[0].changes[0].value.messages[0];
             const senderId = msg.from;
-            const messageBody = msg.text?.body;
+
+            // Extract text from message or button click
+            let messageBody = msg.text?.body;
+            if (msg.type === 'button') {
+                messageBody = msg.button.text;
+            } else if (msg.type === 'interactive') {
+                messageBody = msg.interactive.button_reply?.title || msg.interactive.list_reply?.title;
+            }
 
             if (messageBody) {
                 console.log(`Received message from ${senderId}: ${messageBody}`);
+
+                // Determine context based on buttons
+                let systemPrompt = 'You are a helpful customer support assistant for Renukaa Travels. Keep your replies concise and professional.';
+
+                if (messageBody.toLowerCase().includes('ultimate')) {
+                    systemPrompt += ' The user is interested in the "Ultimate" package. Talk specifically about https://mumbaidarshan.com and its features.';
+                } else if (messageBody.toLowerCase().includes('pro')) {
+                    systemPrompt += ' The user is interested in the "Pro" package. Talk specifically about https://mumbaidarshan.pro and its features.';
+                }
 
                 try {
                     // 1. Get response from Groq
@@ -49,7 +65,7 @@ app.post('/webhook', async (req, res) => {
                         messages: [
                             {
                                 role: 'system',
-                                content: 'You are a helpful customer support assistant for a business. Keep your replies concise and professional.',
+                                content: systemPrompt,
                             },
                             {
                                 role: 'user',
