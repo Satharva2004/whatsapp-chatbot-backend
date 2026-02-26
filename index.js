@@ -56,7 +56,7 @@ app.post('/webhook', async (req, res) => {
                                 content: messageBody,
                             },
                         ],
-                        model: 'llama3-8b-8192', // Or your preferred Groq model
+                        model: 'llama-3.3-70b-versatile', // Updated to a supported model
                     });
 
                     const aiResponse = chatCompletion.choices[0]?.message?.content || "I'm sorry, I couldn't process that.";
