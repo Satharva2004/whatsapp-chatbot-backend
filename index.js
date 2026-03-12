@@ -2,6 +2,24 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const Groq = require('groq-sdk');
+const mongoose = require('mongoose');
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/medisetu')
+  .then(() => console.log('MongoDB Connected'))
+  .catch(err => console.error('MongoDB Connection Error:', err));
+
+// Define Session Schema
+const sessionSchema = new mongoose.Schema({
+    senderId: { type: String, required: true, unique: true },
+    messages: [
+        {
+            role: { type: String, enum: ['system', 'user', 'assistant'] },
+            content: { type: String }
+        }
+    ] // We'll keep the full history here
+});
+const Session = mongoose.model('Session', sessionSchema);
 
 const app = express();
 app.use(express.json());
@@ -177,13 +195,28 @@ STEP 4 — If EMERGENCY, always end with: "अभी 108 पर कॉल कर
 <output_format>
 Every response must follow this exact structure (translate to Hindi/Punjabi as needed):
 
-**स्थिति (Status):** 🔴 EMERGENCY / 🟡 CONSULT TODAY / 🟢 MONITOR AT HOME  
-**सलाह (Advice):** [1-2 plain-language sentences]  
-**अगला कदम (Next Step):** [One specific action]  
-[If EMERGENCY, add:] **📞 अभी 108 पर कॉल करें**
+*स्थिति (Status):* 🔴 EMERGENCY / 🟡 CONSULT TODAY / 🟢 MONITOR AT HOME  
+
+*सलाह (Advice):*
+[1-2 plain-language sentences describing the situation simply]
+
+*अगला कदम (Next Step):*
+[One specific action]
+
+[If EMERGENCY, add:]
+📞 *अभी 108 पर कॉल करें*
 
 Keep total response under 120 words.
 </output_format>
+
+<formatting_rules>
+- CRITICAL: Never use markdown headers (like # or ##).
+- CRITICAL: Use single asterisks for bold (*स्थिति*). NEVER use double asterisks (**स्थिति**).
+- Use single underscores for italics (_text_).
+- Heavily use appropriate emojis (🩺, 💊, ⚠️, 🚑, 👩‍⚕️) to make text friendly and beautiful.
+- Add clear line breaks between sections to make the message easy to read on WhatsApp.
+- If asking follow-up questions, use bullet points (•) and keep them to a maximum of 2 questions.
+</formatting_rules>
 
 <grounding_rules>
 - You are a strictly grounded assistant. Base clinical responses on verified Indian health guidelines from the URL sources above.
@@ -213,22 +246,45 @@ These symptoms always trigger 🔴 EMERGENCY regardless of any other context:
                 }
 
                 try {
+                    // Fetch existing session or create a new one
+                    let userSession = await Session.findOne({ senderId });
+                    if (!userSession) {
+                        userSession = new Session({ senderId, messages: [] });
+                    }
+
+                    // Build the AI's message array
+                    let aiMessages = [
+                        {
+                            role: 'system',
+                            content: systemPrompt,
+                        }
+                    ];
+
+                    // If it's the specific rural medi-bot number, append history
+                    if (senderId === '919082944120' || senderId === '+919082944120' || senderId === '+91 9082944120') {
+                        // Keep last 10 messages from history to prevent huge payloads
+                        const historyTokens = userSession.messages.slice(-10);
+                        aiMessages = aiMessages.concat(historyTokens);
+                    }
+
+                    // Append the new user message
+                    const newUserMessage = { role: 'user', content: messageBody };
+                    aiMessages.push(newUserMessage);
+
                     // 1. Get response from Groq
                     const chatCompletion = await groq.chat.completions.create({
-                        messages: [
-                            {
-                                role: 'system',
-                                content: systemPrompt,
-                            },
-                            {
-                                role: 'user',
-                                content: messageBody,
-                            },
-                        ],
+                        messages: aiMessages,
                         model: 'llama-3.3-70b-versatile', // Updated to a supported model
                     });
 
                     const aiResponse = chatCompletion.choices[0]?.message?.content || "I'm sorry, I couldn't process that.";
+
+                    // Save the new interaction to db if it's the special number
+                    if (senderId === '919082944120' || senderId === '+919082944120' || senderId === '+91 9082944120') {
+                        userSession.messages.push(newUserMessage);
+                        userSession.messages.push({ role: 'assistant', content: aiResponse });
+                        await userSession.save();
+                    }
 
                     // 2. Send response back to WhatsApp
                     await axios({
