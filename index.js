@@ -263,7 +263,11 @@ These symptoms always trigger 🔴 EMERGENCY regardless of any other context:
                     // If it's the specific rural medi-bot number, append history
                     if (senderId === '919082944120' || senderId === '+919082944120' || senderId === '+91 9082944120') {
                         // Keep last 10 messages from history to prevent huge payloads
-                        const historyTokens = userSession.messages.slice(-10);
+                        // Crucially, map them to remove the Mongoose _id field that Groq rejects
+                        const historyTokens = userSession.messages.slice(-10).map(msg => ({
+                            role: msg.role,
+                            content: msg.content
+                        }));
                         aiMessages = aiMessages.concat(historyTokens);
                     }
 
