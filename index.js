@@ -12,6 +12,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/medisetu'
 // Define Session Schema
 const sessionSchema = new mongoose.Schema({
     senderId: { type: String, required: true, unique: true },
+    language: { type: String, default: null }, // NEW: Store user language preference
     messages: [
         {
             role: { type: String, enum: ['system', 'user', 'assistant'] },
@@ -249,19 +250,37 @@ These symptoms always trigger 🔴 EMERGENCY regardless of any other context:
                     // Fetch existing session or create a new one
                     let userSession = await Session.findOne({ senderId });
                     if (!userSession) {
-                        userSession = new Session({ senderId, messages: [] });
+                        userSession = new Session({ senderId, messages: [], language: null });
                     }
 
-                    // Build the AI's message array
-                    let aiMessages = [
-                        {
-                            role: 'system',
-                            content: systemPrompt,
-                        }
-                    ];
+                    // Basic language detection logic from user message
+                    const msgLower = messageBody.toLowerCase();
+                    if (msgLower.includes('hindi') || msgLower.includes('हिंदी')) {
+                        userSession.language = 'Hindi';
+                    } else if (msgLower.includes('punjabi') || msgLower.includes('ਪੰਜਾਬੀ')) {
+                        userSession.language = 'Punjabi';
+                    } else if (msgLower.includes('english')) {
+                        userSession.language = 'English';
+                    }
 
-                    // If it's the specific rural medi-bot number, append history
+                    // If it's the specific rural medi-bot number, handle MediSetu prompt and append history
                     if (senderId === '919082944120' || senderId === '+919082944120' || senderId === '+91 9082944120') {
+                        
+                        // Dynamically adjust the system prompt based on language
+                        if (userSession.language) {
+                            systemPrompt += `\n\n<language_enforcement>\nCRITICAL: The user has requested to speak in ${userSession.language}. You MUST reply entirely in ${userSession.language}.\n</language_enforcement>`;
+                        } else {
+                            systemPrompt += `\n\n<language_check>\nIf you haven't already, please politely ask the user what language they prefer to converse in (Hindi, Punjabi, or English) so you can assist them better.\n</language_check>`;
+                        }
+
+                        // Build the AI's message array
+                        let aiMessages = [
+                            {
+                                role: 'system',
+                                content: systemPrompt,
+                            }
+                        ];
+
                         // Keep last 10 messages from history to prevent huge payloads
                         // Crucially, map them to remove the Mongoose _id field that Groq rejects
                         const historyTokens = userSession.messages.slice(-10).map(msg => ({
@@ -269,43 +288,68 @@ These symptoms always trigger 🔴 EMERGENCY regardless of any other context:
                             content: msg.content
                         }));
                         aiMessages = aiMessages.concat(historyTokens);
-                    }
+                    
+                        // Append the new user message
+                        const newUserMessage = { role: 'user', content: messageBody };
+                        aiMessages.push(newUserMessage);
 
-                    // Append the new user message
-                    const newUserMessage = { role: 'user', content: messageBody };
-                    aiMessages.push(newUserMessage);
+                        // 1. Get response from Groq
+                        const chatCompletion = await groq.chat.completions.create({
+                            messages: aiMessages,
+                            model: 'llama-3.3-70b-versatile', // Updated to a supported model
+                        });
 
-                    // 1. Get response from Groq
-                    const chatCompletion = await groq.chat.completions.create({
-                        messages: aiMessages,
-                        model: 'llama-3.3-70b-versatile', // Updated to a supported model
-                    });
+                        const aiResponse = chatCompletion.choices[0]?.message?.content || "I'm sorry, I couldn't process that.";
 
-                    const aiResponse = chatCompletion.choices[0]?.message?.content || "I'm sorry, I couldn't process that.";
-
-                    // Save the new interaction to db if it's the special number
-                    if (senderId === '919082944120' || senderId === '+919082944120' || senderId === '+91 9082944120') {
+                        // Save the new interaction to db
                         userSession.messages.push(newUserMessage);
                         userSession.messages.push({ role: 'assistant', content: aiResponse });
                         await userSession.save();
+
+                        // 2. Send response back to WhatsApp
+                        await axios({
+                            method: 'POST',
+                            url: `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+                            data: {
+                                messaging_product: 'whatsapp',
+                                to: senderId,
+                                text: { body: aiResponse },
+                            },
+                            headers: {
+                                'Content-Type': 'application/json',
+                                Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                            },
+                        });
+
+                        console.log(`Sent AI response to ${senderId}`);
+                    } else {
+                        // Standard Renukaa Travels stateless logic for outside users
+                        const chatCompletion = await groq.chat.completions.create({
+                            messages: [
+                                { role: 'system', content: systemPrompt },
+                                { role: 'user', content: messageBody }
+                            ],
+                            model: 'llama-3.3-70b-versatile',
+                        });
+
+                        const aiResponse = chatCompletion.choices[0]?.message?.content || "I'm sorry, I couldn't process that.";
+
+                        await axios({
+                            method: 'POST',
+                            url: `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+                            data: {
+                                messaging_product: 'whatsapp',
+                                to: senderId,
+                                text: { body: aiResponse },
+                            },
+                            headers: {
+                                'Content-Type': 'application/json',
+                                Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                            },
+                        });
+
+                        console.log(`Sent AI response to ${senderId}`);
                     }
-
-                    // 2. Send response back to WhatsApp
-                    await axios({
-                        method: 'POST',
-                        url: `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-                        data: {
-                            messaging_product: 'whatsapp',
-                            to: senderId,
-                            text: { body: aiResponse },
-                        },
-                        headers: {
-                            'Content-Type': 'application/json',
-                            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-                        },
-                    });
-
-                    console.log(`Sent AI response to ${senderId}`);
                 } catch (error) {
                     console.error('Error processing message:', error.response?.data || error.message);
                 }
